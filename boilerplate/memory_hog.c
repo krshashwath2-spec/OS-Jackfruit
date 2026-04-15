@@ -1,68 +1,41 @@
-/*
- * memory_hog.c - Controlled memory pressure workload
- *
- * Fixed version for stable testing:
- *   - allocates memory in chunks
- *   - LIMITED iterations (no infinite loop)
- *   - still triggers soft + hard limits
- */
+obj-m += monitor.o
+ccflags.y += -Wno-error
+KDIR := /lib/modules/$(shell uname -r)/build
+PWD := $(shell pwd)
+# If you want host-built workload binaries to run directly inside an Alpine
+# rootfs, you can override this with WORKLOAD_LDFLAGS=-static when your
+# toolchain supports it.
+WORKLOAD_LDFLAGS ?= -static
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
+USER_TARGETS := engine memory_hog cpu_hog io_pulse
 
-static size_t parse_size_mb(const char *arg, size_t fallback)
-{
-    char *end = NULL;
-    unsigned long value = strtoul(arg, &end, 10);
+all: $(USER_TARGETS) module
 
-    if (!arg || *arg == '\0' || (end && *end != '\0') || value == 0)
-        return fallback;
-    return (size_t)value;
-}
+ci: WORKLOAD_LDFLAGS =
+ci: $(USER_TARGETS)
 
-static useconds_t parse_sleep_ms(const char *arg, useconds_t fallback)
-{
-    char *end = NULL;
-    unsigned long value = strtoul(arg, &end, 10);
+module: monitor.ko
 
-    if (!arg || *arg == '\0' || (end && *end != '\0'))
-        return fallback;
-    return (useconds_t)(value * 1000U);
-}
+engine: engine.c monitor_ioctl.h
+	gcc -O2 -Wall -Wextra -o engine engine.c -lpthread
 
-int main(int argc, char *argv[])
-{
-    const size_t chunk_mb = (argc > 1) ? parse_size_mb(argv[1], 8) : 8;
-    const useconds_t sleep_us = (argc > 2) ? parse_sleep_ms(argv[2], 1000U) : 1000U * 1000U;
-    const size_t chunk_bytes = chunk_mb * 1024U * 1024U;
+memory_hog: memory_hog.c
+	gcc -O2 -Wall $(WORKLOAD_LDFLAGS) -o memory_hog memory_hog.c
 
-    int count = 0;
-    const int max_iterations = 20;   // ✅ LIMIT ADDED
+cpu_hog: cpu_hog.c
+	gcc -O2 -Wall $(WORKLOAD_LDFLAGS) -o cpu_hog cpu_hog.c
 
-    printf("Starting controlled memory hog...\n");
+io_pulse: io_pulse.c
+	gcc -O2 -Wall $(WORKLOAD_LDFLAGS) -o io_pulse io_pulse.c
 
-    for (int i = 0; i < max_iterations; i++) {
-        char *mem = malloc(chunk_bytes);
+monitor.ko: monitor.c monitor_ioctl.h
+	$(MAKE) -C $(KDIR) M=$(PWD) EXTRA_CFLAGS="-Wno-error" modules
 
-        if (!mem) {
-            printf("malloc failed after %d allocations\n", count);
-            break;
-        }
+clean:
+	if [ -d "$(KDIR)" ]; then $(MAKE) -C $(KDIR) M=$(PWD) clean; fi
+	rm -f $(USER_TARGETS) *.o *.mod *.mod.c *.symvers *.order
+	rm -f *.log
+	rm -rf logs
+	rm -f /tmp/mini_runtime.sock
 
-        memset(mem, 'A', chunk_bytes);  // force RSS increase
-
-        count++;
-
-        printf("allocation=%d chunk=%zuMB total=%zuMB\n",
-               count, chunk_mb, (size_t)count * chunk_mb);
-        fflush(stdout);
-
-        usleep(sleep_us);
-    }
-
-    printf("Memory hog finished (controlled execution)\n");
-
-    return 0;
-}
+.PHONY: all ci module clean
